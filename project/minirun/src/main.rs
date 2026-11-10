@@ -1,25 +1,35 @@
+use nix::sched::{unshare, CloneFlags};
+use nix::unistd::sethostname;
 use std::env;
+use std::os::unix::process::CommandExt;
 use std::process::{exit, Command};
 
 fn main() {
-    // Collect the words typed on the command line into a list.
     let args: Vec<String> = env::args().collect();
 
-    // We need at least: minirun run <program>
     if args.len() < 3 || args[1] != "run" {
         eprintln!("usage: minirun run <command> [args...]");
         exit(2);
     }
 
-    let program = &args[2];        // e.g. "ls"
-    let program_args = &args[3..]; // e.g. ["-l"]
+    let program = &args[2];
+    let program_args = &args[3..];
 
     println!("[minirun] starting: {} {:?}", program, program_args);
 
-    // Start the program, wait for it to finish, and get its exit status.
-    let result = Command::new(program).args(program_args).status();
+    let mut cmd = Command::new(program);
+    cmd.args(program_args);
 
-    match result {
+    // This code runs in the child: after fork, before exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            unshare(CloneFlags::CLONE_NEWUTS)?; // get our own UTS namespace
+            sethostname("container")?;          // rename only our copy
+            Ok(())
+        });
+    }
+
+    match cmd.status() {
         Ok(status) => println!("[minirun] finished: {}", status),
         Err(error) => {
             eprintln!("[minirun] could not start '{}': {}", program, error);
