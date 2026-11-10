@@ -1,6 +1,6 @@
 use nix::mount::{mount, MsFlags};
 use nix::sched::{unshare, CloneFlags};
-use nix::unistd::sethostname;
+use nix::unistd::{chdir, chroot, sethostname};
 use std::env;
 use std::os::unix::process::CommandExt;
 use std::process::{exit, Command};
@@ -8,13 +8,14 @@ use std::process::{exit, Command};
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 3 || args[1] != "run" {
-        eprintln!("usage: minirun run <command> [args...]");
+    if args.len() < 4 || args[1] != "run" {
+        eprintln!("usage: minirun run <image-folder> <command> [args...]");
         exit(2);
     }
 
-    let program = &args[2];
-    let program_args = &args[3..];
+    let rootfs = args[2].clone();   // our own copy, for the child to take
+    let program = &args[3];
+    let program_args = &args[4..];
 
     // In the PARENT: our next child will be born into a new PID namespace.
     if let Err(error) = unshare(CloneFlags::CLONE_NEWPID) {
@@ -23,6 +24,7 @@ fn main() {
     }
 
     println!("[minirun] parent pid on the host: {}", std::process::id());
+    println!("[minirun] image: {}", rootfs);
     println!("[minirun] starting: {} {:?}", program, program_args);
 
     let mut cmd = Command::new(program);
@@ -30,12 +32,12 @@ fn main() {
 
     // In the CHILD: after fork, before exec.
     unsafe {
-        cmd.pre_exec(|| {
-            // Own hostname and own list of mounts.
+        cmd.pre_exec(move || {
+            // 1. Own hostname and own list of mounts.
             unshare(CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS)?;
             sethostname("container")?;
 
-            // Make all mounts private, so nothing we mount leaks to the host.
+            // 2. Make all mounts private, so nothing leaks to the host.
             mount(
                 None::<&str>,
                 "/",
@@ -44,7 +46,13 @@ fn main() {
                 None::<&str>,
             )?;
 
-            // A fresh /proc that only shows this PID namespace.
+            // 3. From now on, the image folder is "/".
+            chroot(rootfs.as_str())?;
+
+            // 4. Stand at the new root.
+            chdir("/")?;
+
+            // 5. A fresh /proc inside the image.
             mount(
                 Some("proc"),
                 "/proc",
